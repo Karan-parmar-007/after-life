@@ -2,7 +2,8 @@ import { NextFunction, Request, Response } from "express";
 import bcrypt from "bcrypt"
 export const verifyPassWord = async (req: Request, res: any, next: NextFunction) => {
       try {
-            const { password } = req.query
+            const password = req.body?.password || req.query?.password || req.params?.password;
+            console.log(password)
             if (!password) {
                   return res.status(406).json({
                         success: false,

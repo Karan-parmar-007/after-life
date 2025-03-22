@@ -115,17 +115,7 @@ export const SignUp = async (req: Request, res: Response) => {
         const { email, contact } = req.body;
         const avatar = req.file
         // check for existing users
-        let imageResponse;
-        if (avatar) {
-            imageResponse = await s3Uploader(avatar, process.env.S3_BUCKET_NAME as string)
-            if (imageResponse.error) {
-                return res.status(500).json({
-                    message: "Error uploading image to S3",
-                    success: false,
-                    error: imageResponse.error,
-                }) as unknown as void
-            }
-        }
+
         const userExists = await UserSchema.userExists(email, contact);
         if (userExists) {
             if (userExists.status === "inactive") {
@@ -140,6 +130,17 @@ export const SignUp = async (req: Request, res: Response) => {
             }) as unknown as void
         }
 
+        let imageResponse;
+        if (avatar) {
+            imageResponse = await s3Uploader(avatar, process.env.S3_BUCKET_NAME as string, "avatar", "userimage");
+            if (imageResponse.error) {
+                return res.status(500).json({
+                    message: "Error uploading image to S3",
+                    success: false,
+                    error: imageResponse.error,
+                }) as unknown as void
+            }
+        }
 
         const salt = await bcrypt.genSalt(10); // Generate salt
         const password = await bcrypt.hash(req.body.password, salt); //
@@ -147,13 +148,18 @@ export const SignUp = async (req: Request, res: Response) => {
             ...req.body,
             password,
             image: {
-                ETag: imageResponse?.succesResponse.ETag,
-                key: imageResponse?.succesResponse.Key,
-                Location: imageResponse?.succesResponse.Location
+                ETag: imageResponse?.succesResponse?.ETag,
+                key: imageResponse?.succesResponse?.Key,
+                Location: imageResponse?.succesResponse?.Location
             }
         })
+        const iat = Date.now(); // Current time in milliseconds
+        const exp = iat + 7 * 24 * 60 * 60 * 1000; // Add 7 days (in milliseconds)
+        const token = generateToken(user?._id as string, iat, exp, "login")
+
         return res.status(201).json({
             message: "User Created Successfully",
+            token,
             user: user,
             success: true,
         }) as unknown as void
@@ -210,6 +216,14 @@ export const verifyOtp = async (req: Request, res: Response) => {
                 } else if (inputType === "contact") {
                     user = await UserSchema.findOne({ contact: field }).lean() as IUser;
                 }
+
+                if (!user) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "User not present in the database",
+                    }) as unknown as void;
+                }
+
 
                 const iat = Date.now(); // Current time in milliseconds
                 const exp = iat + 7 * 24 * 60 * 60 * 1000; // Add 7 days (in milliseconds)
@@ -370,40 +384,103 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
     try {
         const { file: newAvatar, user: currentUser } = req;
         let updateFields: any = { ...req.body };
-
-        if (newAvatar) {
-            const { succesResponse, error } = await s3Uploader(newAvatar, process.env.S3_BUCKET_NAME as string);
-            if (error) {
-                return res.status(500).json({
-                    message: error,
+        
+        // Check if email or contact is being updated
+        if (updateFields.email && updateFields.email !== currentUser?.email) {
+            // Check if email already exists for another user
+            const existingEmailUser = await UserModel.findOne({ 
+                _id: { $ne: currentUser?._id }, 
+                email: updateFields.email 
+            });
+            
+            if (existingEmailUser) {
+                return res.status(400).json({
+                    message: 'Email already in use by another user',
                     success: false,
-                }) as unknown as void
+                }) as unknown as void;
             }
-
-            updateFields.image = {
-                Location: succesResponse.Location,
-                key: succesResponse.key,
-                ETag: succesResponse.ETag,
-            };
-
-            if (currentUser?.image?.key) {
-                await deleteFileFromS3(process.env.S3_BUCKET_NAME as string, currentUser.image.key);
-                console.log("Old avatar deleted from S3");
+        }
+        
+        if (updateFields.contact && updateFields.contact !== currentUser?.contact) {
+            // Check if contact already exists for another user
+            const existingContactUser = await UserModel.findOne({ 
+                _id: { $ne: currentUser?._id }, 
+                contact: updateFields.contact 
+            });
+            
+            if (existingContactUser) {
+                return res.status(400).json({
+                    message: 'Contact number already in use by another user',
+                    success: false,
+                }) as unknown as void;
             }
         }
 
-        const user = await UserModel.findByIdAndUpdate(currentUser?._id, updateFields, { new: true });
+        // Handle image upload if a new avatar is provided
+        if (newAvatar) {
+            // First delete the old image if it exists
+            if (currentUser?.image?.key) {
+                const deleteResult = await deleteFileFromS3(
+                    process.env.S3_BUCKET_NAME as string, 
+                    currentUser.image.key
+                );
+                
+                if (deleteResult.error) {
+                    console.log("Warning: Failed to delete previous avatar:", deleteResult.error);
+                    // Continue despite failure to delete, but log the error
+                } else {
+                    console.log("Old avatar deleted from S3");
+                }
+            }
+            
+            // Upload the new avatar
+            const { succesResponse, error } = await s3Uploader(
+                newAvatar, 
+                process.env.S3_BUCKET_NAME as string,
+                "avatar",
+                "userimage"
+            );
+            
+            if (error) {
+                return res.status(500).json({
+                    message: `Error uploading new avatar: ${error}`,
+                    success: false,
+                }) as unknown as void;
+            }
+
+            updateFields.image = {
+                Location: succesResponse?.Location,
+                key: succesResponse?.Key,
+                ETag: succesResponse?.ETag,
+            };
+        }
+
+        // Update user in database
+        const user = await UserModel.findByIdAndUpdate(
+            currentUser?._id, 
+            updateFields, 
+            { new: true }
+        );
+        
+        if (!user) {
+            return res.status(404).json({
+                message: 'User not found',
+                success: false,
+            }) as unknown as void;
+        }
+
         return res.status(200).json({
             message: 'User details updated successfully',
             success: true,
             user
-        }) as unknown as void
+        }) as unknown as void;
     } catch (error) {
+        console.error("Error updating user details:", error);
         return res.status(500).json({
             message: 'Internal server error',
             error: (error as Error).message || error,
             success: false,
-        }) as unknown as void
+        }) as unknown as void;
     }
 };
 
@@ -528,7 +605,7 @@ export const sendResetLink = async (req: Request, res: Response) => {
             }) as unknown as void
         }
         const iat = Date.now()// Current time in seconds (issued at time
-        const exp = iat + 2 * 60 * 1000;
+        const exp = iat + 4 * 60 * 1000;
         const token = generateToken(user?._id as string, iat, exp, "reset")
         user.password_reset_token = token
         await user.save()

@@ -100,7 +100,7 @@ const UserSchema: Schema<IUser> = new Schema({
   ], // Embedding relative schema
   storage_size: {
     type: Number,
-    default: 50
+    default: 20
   },
   password_reset_token: {
     type: String,

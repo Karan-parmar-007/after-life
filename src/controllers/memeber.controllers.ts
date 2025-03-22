@@ -9,10 +9,10 @@ import ArchiveSchema from "../schema/ArchiveSchema";
 
 
 // The addRelative controller assumes that checkFreeUserRelativeLimit middleware has already run.
-export const addRelative = async (req: Request, res: Response) => {
+export const createRelative = async (req: Request, res: Response) => {
   try {
     const { name, relation, email, contact } = req.body;
-
+    
     // Validate required fields
     if (!name || !relation || !email || !contact) {
       res.status(400).json({
@@ -31,7 +31,19 @@ export const addRelative = async (req: Request, res: Response) => {
       return;
     }
 
-    // Check if user is not premium and has 3 or more relatives
+    // Check if a relative with the same email or contact already exists
+    const existingRelativeWithEmailOrContact = user.relative?.find(
+      (rel) => rel.email === email || rel.contact == contact
+    );
+  
+    if (existingRelativeWithEmailOrContact) {
+      res.status(400).json({
+        success: false,
+        message: "A relative with the same email or contact already exists.",
+      });
+      return;
+    }
+
     // Check if user is not premium and has 3 or more relatives
     if (!user.premium && (user.relative?.length || 0) >= 3) {
       res.status(403).json({
@@ -41,12 +53,21 @@ export const addRelative = async (req: Request, res: Response) => {
       return;
     }
 
-
     const relativeImage = req.file;
-    console.log("Relative Image:", relativeImage);
     let relativeImageData;
+
     if (relativeImage) {
-      const { succesResponse, error }= await s3Uploader(relativeImage as any, "test-after-life");
+      // Generate a unique relative ID for the folder structure
+      const newRelativeId = new mongoose.Types.ObjectId().toString();
+      const userId = req.user?._id?.toString();
+
+      // Call s3Uploader with userId and relativeId, enforcing "avatar" folder
+      const { succesResponse, error } = await s3Uploader(
+        relativeImage,
+        "test-after-life",
+        userId,
+        newRelativeId // Will be used as part of the folder structure
+      );
 
       if (error) {
         res.status(500).json({
@@ -55,43 +76,185 @@ export const addRelative = async (req: Request, res: Response) => {
         });
         return;
       }
+
       relativeImageData = {
-        Location: succesResponse.Location,
-        key: succesResponse.Key,
-        ETag: succesResponse.ETag,
+        Location: succesResponse?.Location,
+        key: succesResponse?.Key,
+        ETag: succesResponse?.ETag,
       };
     }
 
-    const existingRelative = user.relative?.find((rel) => rel._id.toString() === req.query.id);
-    if (existingRelative) {
-      const updateData: any = {
-        "relative.$.name": name || existingRelative.name,
-        "relative.$.relation": relation || existingRelative.relation,
-        "relative.$.email": email || existingRelative.email,
-        "relative.$.contact": contact || existingRelative.contact,
-      };
-      if (relativeImageData) {
-        updateData["relative.$.relative_image"] = relativeImageData;
+    // Add the new relative
+    const newRelative = {
+      name,
+      relation,
+      email,
+      contact,
+      relative_image: relativeImageData || {},
+    };
+    
+    const updatedUserDoc = await UserModel.findByIdAndUpdate(
+      req.user?._id,
+      { $push: { relative: newRelative } },
+      { new: true }
+    ).lean();
+
+    if (!updatedUserDoc) {
+      res.status(404).json({
+        success: false,
+        message: "User not found after update.",
+      });
+      return;
+    }
+
+    // Find the newly added relative by contact
+    const addedRelative = updatedUserDoc.relative?.find(
+      (rel) => rel.contact == contact
+    ) as IRelative;
+
+    if (!addedRelative) {
+      res.status(404).json({
+        success: false,
+        message: "Newly added relative not found.",
+      });
+      return;
+    }
+
+    const relativeImageBase64 = addedRelative.relative_image?.key 
+      ? await getImageFromS3(addedRelative.relative_image.key, "test-after-life")
+      : null;
+
+    res.status(200).json({
+      success: true,
+      message: "Relative added successfully.",
+      data: {
+        ...addedRelative,
+        relativeImage: relativeImageBase64,
+      },
+    });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({
+      success: false,
+      message: "An unexpected error occurred.",
+      error: (error as Error).message,
+    });
+  }
+};
+
+
+// Update an existing relative
+export const updateRelative = async (req: Request, res: Response) => {
+  try {
+    const { name, relation, email, contact } = req.body;
+    const relativeId = req.params.id; // Now getting from route params
+
+    if (!relativeId) {
+      res.status(400).json({
+        success: false,
+        message: "Relative ID is required.",
+      });
+      return;
+    }
+
+    const user = await UserModel.findById(req.user?._id);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
+      return;
+    }
+
+    const existingRelative = user.relative?.find((rel) => rel._id.toString() === relativeId);
+    if (!existingRelative) {
+      res.status(404).json({
+        success: false,
+        message: "Relative not found.",
+      });
+      return;
+    }
+
+    // Check if updating email or contact would conflict with another relative
+    if (email !== existingRelative.email || contact !== existingRelative.contact) {
+      const conflictingRelative = user.relative?.find(
+        (rel) => (rel._id.toString() !== relativeId) && 
+                (rel.email === email || rel.contact == contact)
+      );
+
+      if (conflictingRelative) {
+        res.status(400).json({
+          success: false,
+          message: "Another relative already has this email or contact.",
+        });
+        return;
       }
-      await UserModel.updateOne(
-        { _id: req.user?._id, "relative._id": existingRelative._id },
-        { $set: updateData }
-      );
-    } else {
-      const newRelative = {
-        name,
-        relation,
-        email,
-        contact,
-        relative_image: relativeImageData || {},
-      };
-      await UserModel.findByIdAndUpdate(
-        req.user?._id,
-        { $push: { relative: newRelative } },
-        { new: true }
-      );
     }
 
+    // Process image upload if there is one
+    const relativeImage = req.file;
+    let relativeImageData;
+
+    if (relativeImage) {
+      const userId = req.user?._id?.toString();
+
+      // Delete previous image if it exists
+      if (existingRelative.relative_image?.key) {
+        const deleteResult = await deleteFileFromS3(
+          "test-after-life", 
+          existingRelative.relative_image.key
+        );
+        
+        if (deleteResult.error) {
+          console.log("Warning: Failed to delete previous image:", deleteResult.error);
+          // We continue despite failure to delete - logging the error but not failing the update
+        } else {
+          console.log("Previous image deleted successfully");
+        }
+      }
+
+      // Call s3Uploader with userId and relativeId
+      const { succesResponse, error } = await s3Uploader(
+        relativeImage,
+        "test-after-life",
+        userId,
+        relativeId
+      );
+
+      if (error) {
+        res.status(500).json({
+          success: false,
+          message: `Error uploading image: ${error}`,
+        });
+        return;
+      }
+
+      relativeImageData = {
+        Location: succesResponse?.Location,
+        key: succesResponse?.Key,
+        ETag: succesResponse?.ETag,
+      };
+      console.log("Uploaded Image Data:", relativeImageData);
+    }
+
+    // Update the relative's information
+    const updateData: any = {
+      "relative.$.name": name || existingRelative.name,
+      "relative.$.relation": relation || existingRelative.relation,
+      "relative.$.email": email || existingRelative.email,
+      "relative.$.contact": contact || existingRelative.contact,
+    };
+    
+    if (relativeImageData) {
+      updateData["relative.$.relative_image"] = relativeImageData;
+    }
+    
+    await UserModel.updateOne(
+      { _id: req.user?._id, "relative._id": existingRelative._id },
+      { $set: updateData }
+    );
+
+    // Fetch updated user data
     const updatedUser = await UserModel.findById(req.user?._id).lean();
     if (!updatedUser) {
       res.status(404).json({
@@ -101,23 +264,30 @@ export const addRelative = async (req: Request, res: Response) => {
       return;
     }
 
-    const relative = updatedUser.relative?.filter((rl) =>
-      req.query.id ? rl._id.toString() === req.query.id : rl.contact === contact
-    ) as IRelative[];
+    const updatedRelative = updatedUser.relative?.find(
+      (rel) => rel._id.toString() === relativeId
+    ) as IRelative;
 
-    const relativeImageBase64 = await getImageFromS3(
-      relative[0]?.relative_image?.key as string,
-      "relativesimg"
-    );
+    if (!updatedRelative) {
+      res.status(404).json({
+        success: false,
+        message: "Updated relative not found.",
+      });
+      return;
+    }
+
+    const relativeImageBase64 = updatedRelative.relative_image?.key 
+      ? await getImageFromS3(updatedRelative.relative_image.key, "test-after-life")
+      : null;
+
     res.status(200).json({
       success: true,
-      message: existingRelative ? "Relative updated successfully." : "Relative added successfully.",
+      message: "Relative updated successfully.",
       data: {
-        ...relative[0],
+        ...updatedRelative,
         relativeImage: relativeImageBase64,
       },
     });
-    return;
   } catch (error) {
     console.log(error);
     res.status(500).json({
@@ -125,9 +295,9 @@ export const addRelative = async (req: Request, res: Response) => {
       message: "An unexpected error occurred.",
       error: (error as Error).message,
     });
-    return;
   }
 };
+
 
 
 export const addContent = async (req: Request, res: Response) => {
@@ -156,7 +326,7 @@ export const addContent = async (req: Request, res: Response) => {
           },
           $push: {
             'relative.$.captions': {
-              key: dataResponse.succesResponse.Key,
+              key: dataResponse.succesResponse?.Key,
               caption,
             },
           },
@@ -246,7 +416,7 @@ export const getAllRelatives = async (req: Request, res: Response) => {
     }
     // Map over relatives and fetch images concurrently
     const relativePromises = await user.relative.map(async (relative: any) => {
-      const relativeImageBase64 = await getImageFromS3(relative.relative_image?.key, "relativesimg");
+      const relativeImageBase64 = await getImageFromS3(relative.relative_image?.key, "test-after-life");
       return {
         ...relative.toObject(),
         relativeImage: relativeImageBase64, // Add base64 image to the relative object
@@ -352,48 +522,55 @@ export const deleteContent = async (req: Request, res: Response) => {
 
 export const updateContent = async (req: Request, res: Response) => {
   try {
-    const { caption } = req.body
-
+    const { caption } = req.body;
     const { relativeId, key } = req.query;
     const userId = req.user?._id;
     const file = req.file;
 
+    // Debug logging
+    console.log("Update request params:", { userId, relativeId, key, hasFile: !!file, caption });
+
+    // First verify the user owns this relative
     const user = await UserModel.findOne(
       { _id: userId, "relative._id": relativeId },
-      { "relative.$": 1 } // Project only the matched relative
+      { "relative.$": 1 }
     );
 
     if (!user) {
       return res.status(400).json({
         success: false,
         message: "This is not your relative"
-      }) as unknown as void
+      }) as unknown as void;
     }
 
-    // Delete the file from S3
-
-
+    // File upload case - delete old file and upload new one
     if (file) {
+      // Delete the existing file from S3
       const deleteResponse = await deleteFileFromS3("test-after-life", key as string);
       if (deleteResponse.error) {
         return res.status(400).json({
           success: false,
           message: deleteResponse.error
-        }) as unknown as void
+        }) as unknown as void;
       }
-      // Remove the caption from the user's relative
+
+      // Remove the old caption entry
       await UserModel.findOneAndUpdate(
         { _id: userId, "relative._id": relativeId },
         { $pull: { "relative.$.captions": { key } } },
         { new: true }
       );
+
+      // Upload the new file
       const dataResponse = await s3Uploader(file as any, "test-after-life", userId as string, relativeId as string);
       if (dataResponse.error) {
         return res.status(500).json({
           success: false,
           message: dataResponse.error
-        }) as unknown as void
+        }) as unknown as void;
       }
+
+      // Add the new file and caption
       const updatedRelativeWithFile = await UserModel.findOneAndUpdate(
         {
           _id: userId,
@@ -401,50 +578,71 @@ export const updateContent = async (req: Request, res: Response) => {
         },
         {
           $push: {
-            "relative.$.captions": { key: dataResponse.succesResponse.Key, caption }
+            "relative.$.captions": { key: dataResponse.succesResponse?.Key, caption }
           }
         },
         { new: true }
-      )
+      );
+
       return res.status(200).json({
         success: true,
         user: updatedRelativeWithFile
-      }) as unknown as void
+      }) as unknown as void;
     }
+
+    // Caption update only case (no file)
     if (!file && caption) {
-      console.log(caption)
+      console.log("Updating caption only:", { caption, key });
+
+      // FIXED: Removed the relative.captions.key condition from the find criteria
       const updatedRelativeContentCaption = await UserModel.findOneAndUpdate(
         {
-          _id: userId, // Find the user by ID
-          "relative._id": relativeId, // Match the specific relative by ID
-          "relative.captions.key": key // Ensure the caption with the specific key exists
+          _id: userId,
+          "relative._id": relativeId
         },
         {
           $set: {
-            "relative.$[rel].captions.$[cap].caption": caption // Update the specific caption
+            "relative.$[rel].captions.$[cap].caption": caption
           }
         },
         {
           arrayFilters: [
-            { "rel._id": relativeId }, // Match the correct relative in the array
-            { "cap.key": key } // Match the correct caption in the captions array
+            { "rel._id": relativeId },
+            { "cap.key": key }
           ],
-          new: true // Return the updated document
+          new: true
         }
-      )
+      );
+
+      // Debug logging for the update result
+      console.log("Update result:", updatedRelativeContentCaption ? "Document updated" : "No document found");
+
+      if (!updatedRelativeContentCaption) {
+        // If no document was updated, it might be because the key doesn't exist
+        return res.status(404).json({
+          success: false,
+          message: "Caption not found with the provided key"
+        }) as unknown as void;
+      }
 
       return res.status(200).json({
         success: true,
         user: updatedRelativeContentCaption
-      }) as unknown as void
+      }) as unknown as void;
     }
 
+    // If we reach here, neither file nor caption was provided
+    return res.status(400).json({
+      success: false,
+      message: "Either file or caption is required"
+    }) as unknown as void;
 
   } catch (error) {
+    console.error("Error in updateContent:", error);
     return res.status(500).json({
       success: false,
       message: (error as Error).message,
-    }) as unknown as void
+    }) as unknown as void;
   }
 };
 
@@ -572,7 +770,7 @@ export const getContentForRelative = async (req: Request, res: Response) => {
     const data = await getUserRelativeData(relativeId as string, userId as string);
 
     if (user.status === "expired" && relative.content_sent === true) {
-      const relativeImageBase64 = await getImageFromS3(relative.relative_image?.key as string, "relativesimg");
+      const relativeImageBase64 = await getImageFromS3(relative.relative_image?.key as string, "test-after-life");
       
       res.status(200).json({
         success: true,

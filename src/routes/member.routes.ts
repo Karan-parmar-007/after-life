@@ -2,7 +2,8 @@ import { Router } from "express";
 import isAuthenticatedUser from "../middlewares/checkAuth";
 import {
       addContent,
-      addRelative,
+      updateRelative,
+      createRelative,
       deleteContent,
       fallBackResponded,
       getAllRelatives,
@@ -15,11 +16,13 @@ import { multerUpload, optimizeMedia } from "../util/multer";
 import { getStorageSize } from "../controllers/user.controllers";
 import { verifyPassWord } from "../middlewares/verifyPassword";
 import { checkStorage } from "../middlewares/checkStorage";
-import { checkFreeUserRelativeLimit } from "../middlewares/checkNumberOfRelatives";
+// import { checkFreeUserRelativeLimit } from "../middlewares/checkNumberOfRelatives";
 
 const memberRoutes = Router()
 
-memberRoutes.put("/add-member", isAuthenticatedUser, multerUpload.single("relativeImg"), checkFreeUserRelativeLimit, optimizeMedia, addRelative)
+// memberRoutes.put("/add-member", isAuthenticatedUser, multerUpload.single("relativeImg"), checkFreeUserRelativeLimit, optimizeMedia, createRelative)
+memberRoutes.post("/add-member", isAuthenticatedUser, multerUpload.single("relativeImg"), optimizeMedia, createRelative)
+memberRoutes.put("/update-member/:id", isAuthenticatedUser, multerUpload.single("relativeImg"), optimizeMedia, updateRelative)
 memberRoutes.get("/all-members", isAuthenticatedUser, getAllRelatives)
 memberRoutes.post("/add-content/:id", isAuthenticatedUser, multerUpload.single("file"), optimizeMedia, checkStorage, addContent)
 memberRoutes.get("/get-content/:id", isAuthenticatedUser, getContent)
