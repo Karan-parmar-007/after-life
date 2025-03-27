@@ -1,6 +1,6 @@
 import { Router } from "express"
 import {
-      login, getUserProfile, resetPassword, resetPasswordByPassword, sendOTp,
+      login, getUserProfile, resetPassword, resetPasswordByPassword, sendOtp,
       sendResetLink, SignUp, updateBasicDetails, updateEmailAndContact, updateUserStatus, verifyOtp
 } from "../controllers/user.controllers";
 import { multerUpload, optimizeMedia } from "../util/multer";
@@ -11,7 +11,7 @@ const authRoutes = Router()
 
 authRoutes.post("/signup", multerUpload.single("avatar"), optimizeMedia, SignUp);
 authRoutes.post("/verify-otp", verifyOtp)
-authRoutes.post("/send-otp", sendOTp)
+authRoutes.post("/send-otp", sendOtp)
 authRoutes.post("/login", login)
 authRoutes.get("/me", isAuthenticatedUser, getUserProfile)
 authRoutes.put("/update-me", isAuthenticatedUser, multerUpload.single("newAvatar"), optimizeMedia, updateBasicDetails)

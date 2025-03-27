@@ -3,6 +3,7 @@ import { IUser } from "../interfaces/User.interfaces";
 import jwt from "jsonwebtoken"
 import { getImageFromS3 } from "../util/S3.util";
 import { bool } from "sharp";
+import JwtSchema from "./JwtSchema";
 
 
 interface IUserModel extends Model<IUser> {
@@ -111,13 +112,43 @@ const UserSchema: Schema<IUser> = new Schema({
 });
 
 
-UserSchema.methods.generateTokens = function () {
-  return jwt.sign({
-    id: this._id
-  },
-    process.env.JWT_SECRET ?? ""
-  )
-}
+UserSchema.methods.generateToken = async function (tokenSecret: string, type?: string): Promise<string> {
+  const iat = Math.floor(Date.now() / 1000);
+  const exp = iat + (7 * 24 * 60 * 60); // 7 days in seconds
+  const token = jwt.sign(
+    {
+      user: {
+        id: this._id,
+      },
+      type,
+      iat, // Issued at time
+      exp, // Expiration time
+    },
+    tokenSecret ?? "a-string-secret-at-least-256-bits-long",
+    {
+      algorithm: "HS256",
+    }
+  );
+
+  // Check if a token already exists for this user
+  let existingToken = await JwtSchema.findOne({ user_id: this._id });
+  if (existingToken) {
+    // Replace the existing token
+    existingToken.jwt = token;
+    await existingToken.save();
+  } else {
+    // Create a new token document
+    await JwtSchema.create({
+      jwt: token,
+      user_id: this._id,
+    });
+  }
+
+  return token;
+};
+
+
+
 // check user already exists or not
 UserSchema.statics.userExists = async function (email: string, contact: string) {
   return await this.findOne({
@@ -127,18 +158,7 @@ UserSchema.statics.userExists = async function (email: string, contact: string) 
     ]
   });
 };
-// Pre-save hook to hash the password
-// UserSchema.pre<IUser>('save', async function (next) {
-//   console.log(this.isModified("password"))
-//   if (!this.isModified('password')) return next(); // Only hash the password if it has been modified (or is new)
-//   try {
-//     const salt = await bcrypt.genSalt(10); // Generate salt
-//     this.password = await bcrypt.hash(this.password, salt); // Hash the password
-//     next(); // Proceed to save the document
-//   } catch (error: any) {
-//     next(error); // Pass errors to the next middleware
-//   }
-// });
+
 
 const UserModel = mongoose.model<IUser, IUserModel>('User', UserSchema);
 export default UserModel;

@@ -40,12 +40,12 @@ export interface IUser extends Document {
     contact_verified: boolean,
     storage_size: number,
     relative?: IRelative[]; // You may want to specify the exact type of relative if known
-    generateTokens: () => string;
     days: string,
     fallback: ObjectId,
     contentType: string,
     platform: string,
     settings_created_at: Date | null,
-    password_reset_token: string | null
+    password_reset_token: string | null,
+    generateToken: (secret: string, type?: string) => Promise<string>;
 }
 // {"conversationId":"28770727-3d0f-4d66-87a4-59b0f9adcdce","source":"instruct"}

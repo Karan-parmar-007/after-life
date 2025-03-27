@@ -1,33 +1,50 @@
-import crypto from "crypto"
-// import dotenv from "dotenv"
-// dotenv.config()
-let binary=process.env.BINARY_TO_HASH_OTO as string
+// otp.ts
+import mongoose, { Schema } from 'mongoose';
+import OtpModel, { IOtp } from '../schema/OtpSchema';
+import crypto from "crypto";
 
-interface typeVerifyHash{
-    err:string|null,
-    verified:string|null
+interface HashOtpResponse {
+    fullhash: string;
+}
 
+interface TypeVerifyHash {
+    err: string | null;
+    verified: boolean;
 }
-export const hashOtp=async(field:String|number)=>{
-    const otp = Math.floor(1000 + Math.random() * 9000)
-    const ttl=20*60*100
-    const expires=Date.now()+ttl
-    const data=`${field}.${otp}.${expires}`;
-    const hash=crypto.createHmac('sha256',binary).update(data).digest("hex")
-    const fullhash=`${hash}.${expires}`
-    return {
-        fullhash,
-        otp
+
+export const hashOtp = (otp: number, field: string): HashOtpResponse => {
+    const data = `${field}.${otp}`;
+    const hash = crypto.createHmac('sha256', process.env.BINARY_TO_HASH_OTP as string)
+        .update(data)
+        .digest("hex");
+    const fullhash = `${hash}`;
+    return { fullhash };
+};
+
+export const verifyHash = async (field: string | number , otp: number) => {
+    const response: TypeVerifyHash = { err: null, verified: false };
+
+    let otp_data = await OtpModel.findOne({ user_id: field })
+    if (!otp_data) {
+        response.err = "OTP not found";
+        return response;
     }
-}
-export const verifyHash = (expires: string, field: number|String, otp: number) => {
-    let response:typeVerifyHash = { err: null, verified: null }
-    let now = Date.now();
-    if (now > parseInt(expires)) {
-          response.err = 'Timeout. Please try again'
+
+    let hashed_otp = otp_data?.hashed_otp;
+    let expires = otp_data?.expires_in;
+
+    const iat = new Date();
+    if (expires < iat ) {
+        response.err = "OTP expired";
+        return response;
     }
-    let data = `${field}.${otp}.${expires}`;
-    let newCalculatedHash = crypto.createHmac('sha256', binary).update(data).digest('hex');
-    response.verified = newCalculatedHash
-    return response
-}
+    
+    const data = `${field}.${otp}`;
+    const hash = crypto.createHmac('sha256', process.env.BINARY_TO_HASH_OTP as string)
+        .update(data)
+        .digest("hex");
+    let test = hash === hashed_otp
+    console.log(test)
+    response.verified = hash === hashed_otp;
+    return response;
+};

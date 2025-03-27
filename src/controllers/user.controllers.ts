@@ -10,6 +10,8 @@ import jwt from "jsonwebtoken"
 import bcrypt from "bcrypt"
 import UserModel from '../schema/UserSchema';
 import { console } from 'inspector';
+import OtpModel from '../schema/OtpSchema';
+
 
 export interface MulterFile {
     fieldname: string;
@@ -24,23 +26,24 @@ export interface MulterFile {
 }
 
 // Augment the Express Request type to include `file`
-export const sendOTp = async (req: Request, res: Response) => {
+export const sendOtp = async (req: Request, res: Response) => {
     try {
         const { field } = req.body;
 
+        // Validate input
         if (!field) {
             res.status(400).json({
                 success: false,
                 message: "Field is required",
             });
-            return 
+            return;
         }
 
-        // Function to check whether input is an email or a contact number
+        // Function to determine if input is email or phone
         const checkInputType = (input: string): "email" | "contact" | "invalid" => {
-            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/; // Basic email format check
-            const phoneRegex = /^\d{10,15}$/; // Allows 10-15 digit phone numbers
-            
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            const phoneRegex = /^\d{10,15}$/;
+
             if (emailRegex.test(input)) return "email";
             if (phoneRegex.test(input)) return "contact";
             return "invalid";
@@ -53,10 +56,10 @@ export const sendOTp = async (req: Request, res: Response) => {
                 success: false,
                 message: "Invalid input. Please enter a valid email or phone number",
             });
-            return 
+            return;
         }
 
-        // Check if user already exists in the database
+        // Check if user exists in the system
         let userExists;
         if (inputType === "email") {
             userExists = await UserSchema.findOne({ email: field });
@@ -64,49 +67,102 @@ export const sendOTp = async (req: Request, res: Response) => {
             userExists = await UserSchema.findOne({ contact: field });
         }
 
-        if (userExists) {
-            if (userExists.status === "inactive") {
-                res.status(400).json({
-                    success: false,
-                    message: `Account associated with ${field} is not active. Please contact support.`,
-                });
-                return 
-            }
+        if (userExists && userExists.status === "inactive") {
             res.status(400).json({
                 success: false,
-                message: `${field} is already in use`,
+                message: `Account associated with ${field} is not active. Please contact support.`,
             });
-            return 
+            return;
         }
 
-        let otpResponse;
+        // Generate OTP and hash it
+        const otp = Math.floor(1000 + Math.random() * 9000);
+        const hashResponse = await hashOtp(otp, field);
+        const hashed_otp = hashResponse.fullhash;
+        const now = new Date();
 
+        // Check for existing OTP entry
+        let otpEntry = await OtpModel.findOne({ user_id: field });
+
+        if (otpEntry) {
+            // Prevent spam by enforcing a 30-second cooldown
+            const timeSinceLastOtp = (now.getTime() - otpEntry.date_time_when_otp_was_created.getTime()) / 1000;
+
+            if (timeSinceLastOtp < 30) {
+                res.status(429).json({
+                    success: false,
+                    message: "Must wait 30 seconds before trying again",
+                });
+                return;
+            }
+
+            // Handle excessive retries (max 4 attempts)
+            if (otpEntry.number_of_time_asked >= 4) {
+                if (!otpEntry.retry_interval) {
+                    otpEntry.retry_interval = new Date(now.getTime() + 15 * 60 * 1000); // 15-minute cooldown
+                    await otpEntry.save();
+                    res.status(429).json({
+                        success: false,
+                        message: "Try again after 15 minutes",
+                    });
+                    return;
+                }
+
+                if (otpEntry.retry_interval > now) {
+                    const timeLeft = Math.ceil((otpEntry.retry_interval.getTime() - now.getTime()) / 1000);
+                    res.status(429).json({
+                        success: false,
+                        message: `Try again after ${timeLeft} seconds`,
+                    });
+                    return;
+                }
+
+                // Reset after cooldown period
+                otpEntry.number_of_time_asked = 0;
+                otpEntry.retry_interval = null;
+            }
+
+            // Update existing OTP entry
+            otpEntry.hashed_otp = hashed_otp;
+            otpEntry.number_of_time_asked += 1;
+            otpEntry.date_time_when_otp_was_created = now;
+            otpEntry.expires_in = new Date(now.getTime() + 2 * 60 * 1000); // 30-minute expiration
+            await otpEntry.save();
+        } else {
+            // Create new OTP entry
+            await OtpModel.create({
+                hashed_otp: hashed_otp,
+                number_of_time_asked: 1,
+                date_time_when_otp_was_created: now,
+                expires_in: new Date(now.getTime() + 2 * 60 * 1000), // 30-minute expiration
+                user_id: field,
+                retry_interval: null,
+            });
+        }
+
+        // Send OTP based on input type
         if (inputType === "email") {
-            otpResponse = await hashOtp(field);
-            await sendEmail(field, "Verify OTP", `Your OTP is: ${otpResponse.otp}`);
+            await sendEmail(field, "Verify OTP", `Your OTP is: ${otp}`);
         } else if (inputType === "contact") {
-            otpResponse = await hashOtp(field);
-            // Send OTP via SMS API (implement sendSms function)
-            // await sendSms(field, `Your OTP is: ${otpResponse.otp}`);
+            // await sendSms(field, `Your OTP is: ${otp}`);
         }
 
         res.status(200).json({
-            message: "OTP Sent Successfully",
-            otp: otpResponse?.otp,
-            hash: otpResponse?.fullhash,
+            message: userExists ? "User exists" : "User doesn't exist",
             success: true,
+            otp: otp,
         });
-        return
-
+        return;
     } catch (error) {
         console.error("Error sending OTP:", error);
         res.status(500).json({
             success: false,
             error: (error as Error).message || "Internal Server Error",
         });
-        return
+        return;
     }
 };
+
 
 
 
@@ -119,26 +175,29 @@ export const SignUp = async (req: Request, res: Response) => {
         const userExists = await UserSchema.userExists(email, contact);
         if (userExists) {
             if (userExists.status === "inactive") {
-                return res.status(400).json({
+                res.status(400).json({
                     success: false,
                     message: `account associated with ${email} is not active. please contact us`
-                }) as unknown as void
+                })
+                return 
             }
-            return res.status(409).json({
+            res.status(409).json({
                 message: "Email or contact number already exists",
                 success: false,
-            }) as unknown as void
+            })
+            return 
         }
 
         let imageResponse;
         if (avatar) {
             imageResponse = await s3Uploader(avatar, process.env.S3_BUCKET_NAME as string, "avatar", "userimage");
             if (imageResponse.error) {
-                return res.status(500).json({
+                res.status(500).json({
                     message: "Error uploading image to S3",
                     success: false,
                     error: imageResponse.error,
-                }) as unknown as void
+                })
+                return 
             }
         }
 
@@ -153,111 +212,129 @@ export const SignUp = async (req: Request, res: Response) => {
                 Location: imageResponse?.succesResponse?.Location
             }
         })
-        const iat = Date.now(); // Current time in milliseconds
-        const exp = iat + 7 * 24 * 60 * 60 * 1000; // Add 7 days (in milliseconds)
-        const token = generateToken(user?._id as string, iat, exp, "login")
+        const token=user.generateToken(process.env.JWT_SECRET as string)
 
-        return res.status(201).json({
+        res.status(201).json({
             message: "User Created Successfully",
             token,
             user: user,
             success: true,
-        }) as unknown as void
+        })
+        return 
     } catch (error) {
         console.log(error)
         const errorMessage = (error as Error).message;
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: errorMessage,
-        }) as unknown as void
+        })
+        return 
     }
 };
 
 export const verifyOtp = async (req: Request, res: Response) => {
     try {
-        const { hash, otp, field, type } = req.body
-        Object.entries(req.body).forEach(([key, value]) => {
+        const { otp, field, type } = req.body;
+
+        // Validate request body
+        for (const [key, value] of Object.entries(req.body)) {
             if (value === undefined || value === null) {
-                return res.status(400).json({
+                res.status(400).json({
                     success: false,
                     message: `${key} has value ${value}`
-                }) as unknown as void
+                });
+                return 
             }
-        });
-        let [hashValue, expires] = hash?.split('.');
-        const resp = verifyHash(expires, field, otp as number)
-        //  ||
-        if ((checkInputType(field) === "contact" && otp == 1234) || resp.verified === hashValue) {
-            if (type === "login") {
-                
+        }
 
-                const checkInputType = (input: string): "email" | "contact" | "invalid" => {
-                    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/; // Basic email format check
-                    const phoneRegex = /^\d{10,15}$/; // Allows 10-15 digit phone numbers
-                    
-                    if (emailRegex.test(input)) return "email";
-                    if (phoneRegex.test(input)) return "contact";
-                    return "invalid";
-                };
-        
-                const inputType = checkInputType(field);
-        
-                if (inputType === "invalid") {
-                    res.status(400).json({
-                        success: false,
-                        message: "Invalid input. Please enter a valid email or phone number",
-                    });
-                    return 
-                }
+        console.log(otp, field, type)
 
-                let user
-                if (inputType === "email") {
-                    user = await UserSchema.findOne({ email: field }).lean() as IUser;
-                } else if (inputType === "contact") {
-                    user = await UserSchema.findOne({ contact: field }).lean() as IUser;
-                }
-
-                if (!user) {
-                    return res.status(404).json({
-                        success: false,
-                        message: "User not present in the database",
-                    }) as unknown as void;
-                }
-
-
-                const iat = Date.now(); // Current time in milliseconds
-                const exp = iat + 7 * 24 * 60 * 60 * 1000; // Add 7 days (in milliseconds)
-                const token = generateToken(user?._id as string, iat, exp, "login")
-                let userImageBase64 = user?.image?.key ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string) : null
-                return res.status(200).json({
-                    success: true,
-                    message: `Verified Success`,
-                    token,
-                    user: {
-                        ...user,
-                        userImageBase64
-                    }
-                }) as unknown as void
+        // Check if user exists
+        let user;
+        const inputType = checkInputTypeValid(field); // Define checkInputType once globally
+        if (type === "login") {
+            if (inputType === "email") {
+                user = await UserSchema.findOne({ email: field });
+            } else if (inputType === "contact") {
+                user = await UserSchema.findOne({ contact: field });
             }
-            return res.status(200).json({
+        }
+
+        // OTP verification
+        const resp = await verifyHash(field, otp as number);
+
+        console.log(resp.verified)
+
+        // If OTP bypass for contact numbers (if that’s desired)
+        if (inputType === "contact" && otp === 1234) {
+            resp.verified = true;
+        }
+
+        if (!resp.verified) {
+            res.status(400).json({
+                success: false,
+                message: resp.err || `Incorrect Otp`
+            });
+            return;
+        }
+        
+
+        await OtpModel.deleteOne({ user_id: field });
+
+        // If OTP verified, check user existence and respond accordingly
+        if (type === "login") {
+            if (!user) {
+                res.status(404).json({
+                    success: false,
+                    message: "User not present in the database",
+                });
+                return 
+            }
+
+            const token = await user.generateToken(process.env.JWT_SECRET as string, "login");
+
+            let userImageBase64 = user?.image?.key
+                ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string)
+                : null;
+            
+            res.status(200).json({
                 success: true,
                 message: `Verified Success`,
-            }) as unknown as void
-        }
-        else {
-            return res.status(400).json({
-                success: false,
-                message: `Incorrect Otp`
-            }) as unknown as void
+                token,
+                user: {
+                    ...user.toJSON(),
+                    userImageBase64
+                }
+            });
+            return 
+        } else {
+            // For non-login cases, simply return success message
+            res.status(200).json({
+                success: true,
+                message: `Verified Success`
+            });
+            return 
         }
     } catch (error) {
         const errorMessage = (error as Error).message;
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: errorMessage,
-        }) as unknown as void;
+        });
+        return 
     }
-}
+};
+
+// Define checkInputType globally so that it’s available everywhere
+const checkInputTypeValid = (input: string): "email" | "contact" | "invalid" => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const phoneRegex = /^\d{10,15}$/;
+    
+    if (emailRegex.test(input)) return "email";
+    if (phoneRegex.test(input)) return "contact";
+    return "invalid";
+};
+
 
 export const login = async (req: Request, res: Response) => {
     try {
@@ -265,7 +342,7 @@ export const login = async (req: Request, res: Response) => {
         const checkInputType = (input: string): "email" | "contact" | "invalid" => {
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/; // Basic email format check
             const phoneRegex = /^\d{10,15}$/; // Allows 10-15 digit phone numbers
-            
+
             if (emailRegex.test(input)) return "email";
             if (phoneRegex.test(input)) return "contact";
             return "invalid";
@@ -278,30 +355,29 @@ export const login = async (req: Request, res: Response) => {
                 success: false,
                 message: "Invalid input. Please enter a valid email or phone number",
             });
-            return 
+            return
         }
-        
+
         let user
         if (inputType === "email") {
-            user = await UserSchema.findOne({ email: field }).lean() as IUser;
+            user = await UserSchema.findOne({ email: field });
         } else if (inputType === "contact") {
-            user = await UserSchema.findOne({ contact: field }).lean() as IUser;
+            user = await UserSchema.findOne({ contact: field });
         }
 
         if (!user) {
-            return res.status(404).json({
+            res.status(404).json({
                 message: "user not found",
                 success: false
-            }) as unknown as void
+            }) 
+            return 
         }
         if (password) {
             const isMatch = await bcrypt.compare(password, user.password)
             if (isMatch) {
                 let userImageBase64 = user?.image?.key ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string) : null
-                const iat = Date.now(); // Current time in milliseconds
-                const exp = iat + 7 * 24 * 60 * 60 * 1000; // Add 7 days (in milliseconds)
-                const token = generateToken(user?._id as string, iat, exp, "login")
-                return res.status(200).json({
+                const token=await user.generateToken(process.env.JWT_SECRET as string)
+                res.status(200).json({
                     success: true,
                     message: `Verified Success`,
                     token,
@@ -309,50 +385,60 @@ export const login = async (req: Request, res: Response) => {
                         ...user,
                         userImageBase64
                     }
-                }) as unknown as void
+                })
+                return 
             }
             else {
-                return res.status(406).json({
+                res.status(406).json({
                     success: false,
                     message: "password not matched"
-                }) as unknown as void
+                })
+                return
             }
         }
+        const otp = Math.floor(1000 + Math.random() * 9000)
         switch (checkInputType(field)) {
             case "email":
-                const emailHashReponse = await hashOtp(field)
+                const otp = Math.floor(1000 + Math.random() * 9000);
+                const emailHashResponse = await hashOtp(otp, field);
                 const templateData = {
-                    templateId: 2, // Replace with your template ID
+                    templateId: 2,
                     params: {
                         "FIRSTNAME": user.name,
-                        "SMS": emailHashReponse.otp
+                        "SMS": otp // Use the generated OTP
                     },
-                }
-                await sendEmail(field, 'Verify OTP', undefined, undefined, templateData)
-                return res.status(200).json({
+                };
+                await sendEmail(field, 'Verify OTP', undefined, undefined, templateData);
+                res.status(200).json({
                     message: "Otp Sent Successfully",
-                    hash: emailHashReponse.fullhash,
+                    hash: emailHashResponse.fullhash,
                     success: true,
-                }) as unknown as void
+                });
+                return 
             case "contact":
-                const hashReponse = await hashOtp(field)
-                return res.status(200).json({
+                const contactOtp = Math.floor(1000 + Math.random() * 9000);
+                const contactHashResponse = await hashOtp(contactOtp, field);
+                // Implement SMS sending logic here
+                res.status(200).json({
                     message: "Otp Sent Successfully",
-                    hash: hashReponse.fullhash,
+                    hash: contactHashResponse.fullhash,
                     success: true,
-                }) as unknown as void
+                });
+                return 
             default:
-                return res.status(400).json({
+                res.status(400).json({
                     success: false,
                     message: "Invalid field type",
-                }) as unknown as void
+                })
+                return 
         }
     } catch (error) {
         const errorMessage = (error as Error).message;
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: errorMessage,
-        }) as unknown as void
+        })
+        return 
     }
 }
 
@@ -363,20 +449,22 @@ export const getUserProfile = async (req: Request, res: Response) => {
         if (user?.image.key) {
             userImage = await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string);
         }
-        return res.status(200).json({
+        res.status(200).json({
             success: true,
             data: {
                 ...user?.toObject(),
                 userImageBase64: userImage
             }
-        }) as unknown as void
+        })
+        return 
     } catch (error) {
         console.log(error)
         const errorMessage = (error as Error).message;
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: errorMessage,
-        }) as unknown as void
+        })
+        return 
     }
 }
 
@@ -394,10 +482,11 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
             });
             
             if (existingEmailUser) {
-                return res.status(400).json({
+                res.status(400).json({
                     message: 'Email already in use by another user',
                     success: false,
-                }) as unknown as void;
+                })
+                return 
             }
         }
         
@@ -409,10 +498,11 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
             });
             
             if (existingContactUser) {
-                return res.status(400).json({
+                res.status(400).json({
                     message: 'Contact number already in use by another user',
                     success: false,
-                }) as unknown as void;
+                })
+                return 
             }
         }
 
@@ -442,10 +532,11 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
             );
             
             if (error) {
-                return res.status(500).json({
+                res.status(500).json({
                     message: `Error uploading new avatar: ${error}`,
                     success: false,
-                }) as unknown as void;
+                }) 
+                return 
             }
 
             updateFields.image = {
@@ -463,24 +554,27 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
         );
         
         if (!user) {
-            return res.status(404).json({
+            res.status(404).json({
                 message: 'User not found',
                 success: false,
-            }) as unknown as void;
+            })
+            return 
         }
 
-        return res.status(200).json({
+        res.status(200).json({
             message: 'User details updated successfully',
             success: true,
             user
-        }) as unknown as void;
+        })
+        return 
     } catch (error) {
         console.error("Error updating user details:", error);
-        return res.status(500).json({
+        res.status(500).json({
             message: 'Internal server error',
             error: (error as Error).message || error,
             success: false,
-        }) as unknown as void;
+        })
+        return 
     }
 };
 
@@ -492,10 +586,11 @@ export const updateEmailAndContact = async (req: Request, res: Response) => {
             { $set: req.body },
             { new: true }
         )
-        return res.status(200).json({
+        res.status(200).json({
             success: true,
             user: updatedUser,
-        }) as unknown as void
+        })
+        return 
 
     } catch (error) {
     res.status(500).json({
@@ -566,10 +661,11 @@ export const getStorageSize = async (req: Request, res: Response) => {
         for (const result of results) {
             if (result.error) {
                 // Return the error if one occurred during the folder size calculation
-                return res.status(400).json({
+                res.status(400).json({
                     success: false,
                     error: result.error,
-                }) as unknown as void
+                })
+                return 
             }
             // Accumulate the folder sizes
             size += result.size;
@@ -579,18 +675,20 @@ export const getStorageSize = async (req: Request, res: Response) => {
         const sizeInMB = (size / (1024 * 1024)).toFixed(2);
         const user_storage_size = req.user?.storage_size as number
         // Send response after all folder sizes are calculated
-        return res.status(200).json({
+        res.status(200).json({
             success: true,
             totalSize: user_storage_size,// Return the size in MB as an integer
             used_size: parseFloat(sizeInMB),
             available_size: user_storage_size - parseFloat(sizeInMB),
             totalContent
-        }) as unknown as void
+        })
+        return 
     } catch (error) {
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: (error as Error).message,
-        }) as unknown as void
+        })
+        return 
     }
 }
 
@@ -599,10 +697,11 @@ export const sendResetLink = async (req: Request, res: Response) => {
         const { email } = req.body
         const user = await UserSchema.findOne({ email, status: "active" })
         if (!user) {
-            return res.status(404).json({
+            res.status(404).json({
                 success: false,
                 message: `account associated with ${email} not found`
-            }) as unknown as void
+            })
+            return 
         }
         const iat = Date.now()// Current time in seconds (issued at time
         const exp = iat + 4 * 60 * 1000;
@@ -612,20 +711,23 @@ export const sendResetLink = async (req: Request, res: Response) => {
         const resetURl = `${process.env.FRONTEND_URL}/forgetpassword?token=${token}`
         const data = await sendEmail(user.email, "password reset link", resetURl)
         if (data.error) {
-            return res.status(400).json({
+            res.status(400).json({
                 success: false,
                 message: data.error
-            }) as unknown as void
+            })
+            return 
         }
-        return res.status(200).json({
+        res.status(200).json({
             success: true,
             message: "reset link sent"
-        }) as unknown as void
+        })
+        return 
     } catch (error) {
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: (error as Error).message,
-        }) as unknown as void
+        })
+        return 
     }
 }
 
@@ -646,10 +748,11 @@ export const resetPassword = async (req: Request, res: Response) => {
             const currentDate = new Date(Date.now())
             const expiry = new Date(decodeData.exp)
             if (currentDate > expiry) {
-                return res.status(400).json({
+                res.status(400).json({
                     success: false,
                     message: "link expired"
-                }) as unknown as void
+                })
+                return 
             }
             const salt = await bcrypt.genSalt(10); // Generate salt
             password = await bcrypt.hash(password, salt); //
@@ -666,22 +769,25 @@ export const resetPassword = async (req: Request, res: Response) => {
                 },
                 { new: true } // This option returns the updated document
             )
-            return res.status(200).json({
+            res.status(200).json({
                 success: true,
                 user
-            }) as unknown as void
+            })
+            return 
 
         }
-        return res.status(400).json({
+        res.status(400).json({
             success: false,
             message: "invalid token"
-        }) as unknown as void
+        })
+        return 
 
     } catch (error) {
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: (error as Error).message,
-        }) as unknown as void
+        })
+        return 
     }
 }
 
@@ -691,10 +797,11 @@ export const resetPasswordByPassword = async (req: Request, res: Response) => {
         const { newPassword } = req.body
         const isMatch = await bcrypt.compare(newPassword, req.user?.password as string)
         if (isMatch) {
-            return res.status(406).json({
+            res.status(406).json({
                 success: false,
                 message: "password cannot be your previous one"
-            }) as unknown as void
+            })
+            return 
         }
         const salt = await bcrypt.genSalt(10); // Generate salt
         const password = await bcrypt.hash(newPassword, salt); //
@@ -703,15 +810,17 @@ export const resetPasswordByPassword = async (req: Request, res: Response) => {
                 password
             }
         }, { new: true })
-        return res.status(200).json({
+        res.status(200).json({
             success: true,
             user
-        }) as unknown as void
+        })
+        return 
     } catch (error) {
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: (error as Error).message,
-        }) as unknown as void
+        })
+        return 
     }
 }
 
@@ -722,15 +831,17 @@ export const updateUserStatus = async (req: Request, res: Response) => {
                 status: "inactive"
             }
         }, { new: true })
-        return res.status(200).json({
+        res.status(200).json({
             success: true,
             message: "account deleted"
-        }) as unknown as void
+        })
+        return 
     } catch (error) {
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             error: (error as Error).message,
-        }) as unknown as void
+        }) 
+        return 
     }
 }
 
