@@ -2,7 +2,7 @@ import { Router } from "express"
 import {
       login, getUserProfile, resetPassword, resetPasswordByPassword, sendOtp,
       sendResetLink, SignUp, updateBasicDetails, updateEmailAndContact, updateUserStatus, verifyOtp
-} from "../controllers/user.controllers";
+} from "../controllers/user.controller";
 import { multerUpload, optimizeMedia } from "../util/multer";
 import isAuthenticatedUser from "../middlewares/checkAuth";
 import { verifyPassWord } from "../middlewares/verifyPassword";

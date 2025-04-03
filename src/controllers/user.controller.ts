@@ -148,7 +148,7 @@ export const sendOtp = async (req: Request, res: Response) => {
         }
 
         res.status(200).json({
-            message: userExists ? "User exists" : "User doesn't exist",
+            user_exist: userExists ? true : false,
             success: true,
             otp: otp,
         });
@@ -169,68 +169,95 @@ export const sendOtp = async (req: Request, res: Response) => {
 export const SignUp = async (req: Request, res: Response) => {
     try {
         const { email, contact } = req.body;
-        const avatar = req.file
-        // check for existing users
-
+        const avatar = req.file;
+        // Check for existing users
         const userExists = await UserSchema.userExists(email, contact);
         if (userExists) {
             if (userExists.status === "inactive") {
                 res.status(400).json({
                     success: false,
-                    message: `account associated with ${email} is not active. please contact us`
-                })
-                return 
+                    message: `Account associated with ${email} is not active. Please contact us`,
+                });
+                return;
             }
             res.status(409).json({
                 message: "Email or contact number already exists",
                 success: false,
-            })
-            return 
+            });
+            return;
         }
 
         let imageResponse;
         if (avatar) {
-            imageResponse = await s3Uploader(avatar, process.env.S3_BUCKET_NAME as string, "avatar", "userimage");
+            imageResponse = await s3Uploader(
+                avatar,
+                process.env.S3_BUCKET_NAME as string,
+                "avatar",
+                "userimage"
+            );
             if (imageResponse.error) {
                 res.status(500).json({
                     message: "Error uploading image to S3",
                     success: false,
                     error: imageResponse.error,
-                })
-                return 
+                });
+                return;
             }
         }
 
-        const salt = await bcrypt.genSalt(10); // Generate salt
-        const password = await bcrypt.hash(req.body.password, salt); //
+        const salt = await bcrypt.genSalt(10);
+        const password = await bcrypt.hash(req.body.password, salt);
         const user = await UserSchema.create({
             ...req.body,
             password,
             image: {
                 ETag: imageResponse?.succesResponse?.ETag,
                 key: imageResponse?.succesResponse?.Key,
-                Location: imageResponse?.succesResponse?.Location
-            }
-        })
-        const token=user.generateToken(process.env.JWT_SECRET as string)
+                Location: imageResponse?.succesResponse?.Location,
+            },
+        });
+
+        let userImageBase64 = user?.image?.key
+            ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string)
+            : null;
+
+        const token = await user.generateToken(process.env.JWT_SECRET as string);
+        if (!token) {
+            res.status(500).json({
+                success: false,
+                message: "Error generating token",
+            });
+            return;
+        }
+
+        // Filter the user fields to include only the required ones
+        const filteredUser = {
+            email: user.email,
+            name: user.name,
+            premium: user.premium,
+            contact: user.contact,
+            dob: user.dob,
+        };
 
         res.status(201).json({
             message: "User Created Successfully",
             token,
-            user: user,
+            user: filteredUser,
+            userImageBase64,
             success: true,
-        })
-        return 
+        });
+        return;
     } catch (error) {
-        console.log(error)
+        console.log(error);
         const errorMessage = (error as Error).message;
         res.status(500).json({
             success: false,
             error: errorMessage,
-        })
-        return 
+        });
+        return;
     }
 };
+
 
 export const verifyOtp = async (req: Request, res: Response) => {
     try {
@@ -288,25 +315,32 @@ export const verifyOtp = async (req: Request, res: Response) => {
                     success: false,
                     message: "User not present in the database",
                 });
-                return 
+                return;
             }
-
+        
             const token = await user.generateToken(process.env.JWT_SECRET as string, "login");
-
+        
             let userImageBase64 = user?.image?.key
                 ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string)
                 : null;
-            
+        
+            // Only select the required fields
+            const filteredUser = {
+                email: user.email,
+                name: user.name,
+                premium: user.premium,
+                contact: user.contact,
+                dob: user.dob,
+                userImageBase64,
+            };
+        
             res.status(200).json({
                 success: true,
                 message: `Verified Success`,
                 token,
-                user: {
-                    ...user.toJSON(),
-                    userImageBase64
-                }
+                user: filteredUser,
             });
-            return 
+            return;
         } else {
             // For non-login cases, simply return success message
             res.status(200).json({
@@ -375,19 +409,29 @@ export const login = async (req: Request, res: Response) => {
         if (password) {
             const isMatch = await bcrypt.compare(password, user.password)
             if (isMatch) {
-                let userImageBase64 = user?.image?.key ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string) : null
-                const token=await user.generateToken(process.env.JWT_SECRET as string)
+                let userImageBase64 = user?.image?.key
+                    ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string)
+                    : null;
+                const token = await user.generateToken(process.env.JWT_SECRET as string);
+            
+                // Filter out only the necessary fields
+                const filteredUser = {
+                    email: user.email,
+                    name: user.name,
+                    premium: user.premium,
+                    contact: user.contact,
+                    dob: user.dob,
+                    userImageBase64,
+                };
+            
                 res.status(200).json({
                     success: true,
                     message: `Verified Success`,
                     token,
-                    user: {
-                        ...user,
-                        userImageBase64
-                    }
-                })
-                return 
-            }
+                    user: filteredUser,
+                });
+                return;
+            }            
             else {
                 res.status(406).json({
                     success: false,
@@ -396,42 +440,11 @@ export const login = async (req: Request, res: Response) => {
                 return
             }
         }
-        const otp = Math.floor(1000 + Math.random() * 9000)
-        switch (checkInputType(field)) {
-            case "email":
-                const otp = Math.floor(1000 + Math.random() * 9000);
-                const emailHashResponse = await hashOtp(otp, field);
-                const templateData = {
-                    templateId: 2,
-                    params: {
-                        "FIRSTNAME": user.name,
-                        "SMS": otp // Use the generated OTP
-                    },
-                };
-                await sendEmail(field, 'Verify OTP', undefined, undefined, templateData);
-                res.status(200).json({
-                    message: "Otp Sent Successfully",
-                    hash: emailHashResponse.fullhash,
-                    success: true,
-                });
-                return 
-            case "contact":
-                const contactOtp = Math.floor(1000 + Math.random() * 9000);
-                const contactHashResponse = await hashOtp(contactOtp, field);
-                // Implement SMS sending logic here
-                res.status(200).json({
-                    message: "Otp Sent Successfully",
-                    hash: contactHashResponse.fullhash,
-                    success: true,
-                });
-                return 
-            default:
-                res.status(400).json({
-                    success: false,
-                    message: "Invalid field type",
-                })
-                return 
-        }
+        res.status(400).json({
+            success: false,
+            message: "password is required"
+        })
+        return
     } catch (error) {
         const errorMessage = (error as Error).message;
         res.status(500).json({
@@ -444,29 +457,38 @@ export const login = async (req: Request, res: Response) => {
 
 export const getUserProfile = async (req: Request, res: Response) => {
     try {
-        let userImage
-        const { user } = req
-        if (user?.image.key) {
+        let userImage;
+        const { user } = req;
+        if (user?.image?.key) {
             userImage = await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string);
         }
+
+        // Create an object with only the required fields
+        const filteredUser = {
+            email: user?.email,
+            name: user?.name,
+            premium: user?.premium,
+            contact: user?.contact,
+            dob: user?.dob,
+            userImageBase64: userImage,
+        };
+
         res.status(200).json({
             success: true,
-            data: {
-                ...user?.toObject(),
-                userImageBase64: userImage
-            }
-        })
-        return 
+            data: filteredUser,
+        });
+        return;
     } catch (error) {
-        console.log(error)
+        console.log(error);
         const errorMessage = (error as Error).message;
         res.status(500).json({
             success: false,
             error: errorMessage,
-        })
-        return 
+        });
+        return;
     }
-}
+};
+
 
 export const updateBasicDetails = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -485,8 +507,8 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
                 res.status(400).json({
                     message: 'Email already in use by another user',
                     success: false,
-                })
-                return 
+                });
+                return;
             }
         }
         
@@ -501,8 +523,8 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
                 res.status(400).json({
                     message: 'Contact number already in use by another user',
                     success: false,
-                })
-                return 
+                });
+                return;
             }
         }
 
@@ -535,8 +557,8 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
                 res.status(500).json({
                     message: `Error uploading new avatar: ${error}`,
                     success: false,
-                }) 
-                return 
+                });
+                return;
             }
 
             updateFields.image = {
@@ -557,26 +579,42 @@ export const updateBasicDetails = async (req: Request, res: Response): Promise<v
             res.status(404).json({
                 message: 'User not found',
                 success: false,
-            })
-            return 
+            });
+            return;
         }
+        
+        // Fetch the updated user image from S3 if available
+        let userImageBase64 = user?.image?.key 
+            ? await getImageFromS3(user.image.key, process.env.S3_BUCKET_NAME as string)
+            : null;
+        
+        // Filter user fields to return only the desired ones
+        const filteredUser = {
+            email: user.email,
+            name: user.name,
+            premium: user.premium,
+            contact: user.contact,
+            dob: user.dob,
+            userImageBase64,
+        };
 
         res.status(200).json({
             message: 'User details updated successfully',
             success: true,
-            user
-        })
-        return 
+            user: filteredUser,
+        });
+        return;
     } catch (error) {
         console.error("Error updating user details:", error);
         res.status(500).json({
             message: 'Internal server error',
             error: (error as Error).message || error,
             success: false,
-        })
-        return 
+        });
+        return;
     }
 };
+
 
 export const updateEmailAndContact = async (req: Request, res: Response) => {
     try {

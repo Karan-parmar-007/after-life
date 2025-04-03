@@ -6,10 +6,11 @@ import {
     DeleteObjectCommand,
     ObjectCannedACL  
 } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage"; 
+import mime from 'mime-types';
 import dotenv from "dotenv";
 dotenv.config();
-
 
 const s3Client = new S3Client({
     forcePathStyle: false,
@@ -20,7 +21,6 @@ const s3Client = new S3Client({
         secretAccessKey: process.env.SPACE_OBJECT_STORAGE_AIP_SECRET_KEY || "",
     },
 });
-  
 
 interface ImageData {
     base64Image: string;
@@ -34,9 +34,10 @@ type DeleteResponse = {
 };
 
 interface IS3UploadResponse {
-    succesResponse: { Location: string; Key: string; ETag: string } | null; // Updated to reflect expected properties
+    succesResponse: { Location: string; Key: string; ETag: string } | null;
     error: null | string;
 }
+
 
 const s3Uploader = async (
     avatar: { originalname: string; buffer: Buffer; mimetype: string },
@@ -80,7 +81,7 @@ const s3Uploader = async (
         imageResponse.succesResponse = {
             Location: location,
             Key: uniqueFileName,
-            ETag: result.ETag || "", // ETag is always present in PutObject or CompleteMultipartUpload responses
+            ETag: result.ETag || "",
         };
         console.log("Upload successful:", imageResponse.succesResponse);
     } catch (error) {
@@ -91,8 +92,7 @@ const s3Uploader = async (
     return imageResponse;
 };
 
-
-const getImageFromS3 = async (key: string, bucketName: string): Promise<ImageData | null> => { // Updated return type
+const getImageFromS3 = async (key: string, bucketName: string): Promise<ImageData | null> => {
     if (!key) {
         console.log("No key provided to getImageFromS3");
         return null;
@@ -104,8 +104,6 @@ const getImageFromS3 = async (key: string, bucketName: string): Promise<ImageDat
     };
 
     try {
-        const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-        const { s3Client } = await import("../util/S3.util");
         const command = new GetObjectCommand(params);
         const data = await s3Client.send(command);
 
@@ -116,16 +114,26 @@ const getImageFromS3 = async (key: string, bucketName: string): Promise<ImageDat
 
         const buffer = await data.Body.transformToByteArray();
         const base64Image = Buffer.from(buffer).toString("base64");
-        const size = buffer.length; // Size in bytes
-        const type = data.ContentType || 'application/octet-stream'; // Extract ContentType
+        const size = buffer.length;
+        const type = data.ContentType || 'application/octet-stream';
 
-        return { base64Image, type, size }; // Include all required properties
+        return { base64Image, type, size };
     } catch (error) {
         console.error("Error fetching image from S3:", error);
         return null;
     }
 };
 
+
+const isVideoFile = (contentType: string | undefined, key: string) => {
+    // First check content type
+    if (contentType?.startsWith('video/')) return true;
+    
+    // Fallback to check file extension
+    const extension = key.split('.').pop()?.toLowerCase();
+    const videoExtensions = ['webm', 'mp4', 'mov', 'avi', 'mkv'];
+    return videoExtensions.includes(extension || '');
+};
 
 const getUserRelativeData = async (relativeId: string, user: string) => {
     const params = {
@@ -145,15 +153,55 @@ const getUserRelativeData = async (relativeId: string, user: string) => {
                 };
 
                 const fileData = await s3Client.send(new GetObjectCommand(fileParams));
+                const contentType = fileData.ContentType || mime.lookup(file.Key!) || 'application/octet-stream';
+                const isVideo = isVideoFile(contentType, file.Key!);
+
+                // Generate download URL
+                const downloadUrl = await getSignedUrl(
+                    s3Client,
+                    new GetObjectCommand(fileParams),
+                    { expiresIn: 3600 }
+                );
+
+                // Handle video files
+                if (isVideo) {
+                    // Get file extension for content type validation
+                    const extension = file.Key!.split('.').pop()?.toLowerCase();
+                    
+                    // Force correct content type and disposition in signed URL
+                    const streamingUrl = await getSignedUrl(
+                        s3Client,
+                        new GetObjectCommand({
+                            ...fileParams,
+                            ResponseContentType: contentType,  // Force correct MIME type
+                            ResponseContentDisposition: 'inline; filename="video"', // Prevent download
+                        }),
+                        { expiresIn: 3600 }
+                    );
+
+                    return {
+                        type: contentType,
+                        key: file.Key,
+                        size: file.Size,
+                        lastModified: file.LastModified,
+                        streamingUrl,
+                        downloadUrl,
+                        isVideo: true
+                    };
+                }
+
+                // Handle non-video files
                 const buffer = fileData.Body ? await fileData.Body.transformToByteArray() : null;
                 const base64Data = buffer ? Buffer.from(buffer).toString("base64") : null;
 
                 return {
-                    type: fileData.ContentType || "unknown",
+                    type: contentType,
                     key: file.Key,
                     size: file.Size,
                     lastModified: file.LastModified,
                     base64: base64Data,
+                    downloadUrl,
+                    isVideo: false
                 };
             })
         );
@@ -164,6 +212,7 @@ const getUserRelativeData = async (relativeId: string, user: string) => {
         throw new Error("Could not retrieve files from Spaces");
     }
 };
+
 
 const deleteFileFromS3 = async (bucketName: string, key: string): Promise<DeleteResponse> => {
     let deleteResponse: DeleteResponse = {
@@ -183,9 +232,8 @@ const deleteFileFromS3 = async (bucketName: string, key: string): Promise<Delete
     return deleteResponse;
 };
 
-
 async function getFolderSize(bucketName: string, folderPath: string) {
-    let check_size_response = { size: 0, error: null as string | null, content: 0 }; // Allow error to be string or null
+    let check_size_response = { size: 0, error: null as string | null, content: 0 };
     let continuationToken: string | undefined = undefined;
 
     try {

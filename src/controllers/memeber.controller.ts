@@ -5,13 +5,14 @@ import { deleteFileFromS3, getImageFromS3, getUserRelativeData, s3Uploader } fro
 import ScheduleSchema from "../schema/ScheduleSchema";
 import { IRelative, IUser } from "../interfaces/User.interfaces";
 import ArchiveSchema from "../schema/ArchiveSchema";
+import { sendEmail } from '../util/Email.util';
 
 
 
 // The addRelative controller assumes that checkFreeUserRelativeLimit middleware has already run.
 export const createRelative = async (req: Request, res: Response) => {
   try {
-    const { name, relation, email, contact } = req.body;
+    const { name, relation, email, contact, send_notification } = req.body;
     
     // Validate required fields
     if (!name || !relation || !email || !contact) {
@@ -108,9 +109,9 @@ export const createRelative = async (req: Request, res: Response) => {
     }
 
     // Find the newly added relative by contact
-    const addedRelative = updatedUserDoc.relative?.find(
-      (rel) => rel.contact == contact
-    ) as IRelative;
+      const addedRelative = updatedUserDoc.relative?.find(
+        (rel) => rel.contact == contact
+      ) as IRelative;
 
     if (!addedRelative) {
       res.status(404).json({
@@ -120,17 +121,22 @@ export const createRelative = async (req: Request, res: Response) => {
       return;
     }
 
-    const relativeImageBase64 = addedRelative.relative_image?.key 
-      ? await getImageFromS3(addedRelative.relative_image.key, "test-after-life")
-      : null;
+    if (send_notification){
+      await sendEmail(email, "Someone you know Has added you to our Platform", `Hey ${name}, You have been added to our platform by someone you know. Check our platform out : https://karanparmar.in `, null, null);
+    }
+
+
+    // const relativeImageBase64 = addedRelative.relative_image?.key 
+    //   ? await getImageFromS3(addedRelative.relative_image.key, "test-after-life")
+    //   : null;
 
     res.status(200).json({
       success: true,
       message: "Relative added successfully.",
-      data: {
-        ...addedRelative,
-        relativeImage: relativeImageBase64,
-      },
+      // data: {
+      //    ...addedRelative,
+      //    relativeImage: relativeImageBase64,
+      // },
     });
   } catch (error) {
     console.log(error);
@@ -276,17 +282,17 @@ export const updateRelative = async (req: Request, res: Response) => {
       return;
     }
 
-    const relativeImageBase64 = updatedRelative.relative_image?.key 
-      ? await getImageFromS3(updatedRelative.relative_image.key, "test-after-life")
-      : null;
+    // const relativeImageBase64 = updatedRelative.relative_image?.key 
+    //   ? await getImageFromS3(updatedRelative.relative_image.key, "test-after-life")
+    //   : null;
 
     res.status(200).json({
       success: true,
       message: "Relative updated successfully.",
-      data: {
-        ...updatedRelative,
-        relativeImage: relativeImageBase64,
-      },
+      // data: {
+      //   ...updatedRelative,
+      //   relativeImage: relativeImageBase64,
+      // },
     });
   } catch (error) {
     console.log(error);
@@ -340,10 +346,11 @@ export const addContent = async (req: Request, res: Response) => {
       });
       return
     } else {
-      return res.status(400).json({
+    res.status(400).json({
         success: false,
         message: 'No files uploaded.',
-      }) as unknown as void;
+      })
+      return
     }
   } catch (error) {
     res.status(500).json({
@@ -362,84 +369,144 @@ export const getContent = async (req: Request, res: Response) => {
         "relative._id": req.params.id,
       },
       { "relative.$": 1 }
-    ).lean() as IUser
+    ).lean() as IUser;
 
     if (!relativeData || !relativeData.relative || relativeData.relative.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "relative not found"
-      }) as unknown as void
+        message: "Relative not found",
+      }) as unknown as void;
     }
 
     const relative = relativeData.relative[0];
-    const data = await getUserRelativeData(relative._id.toString(), req.user?._id as string)
+    
+    // Extract captions from relative data
+    const captions = relative.captions || [];
+
+    let contentData = await getUserRelativeData(relative._id.toString(), req.user?._id as string);
+
+    // Attach captions to their respective content
+    // Attach captions to their respective content
+
+    interface Caption {
+      _id: string;
+      key: string;
+      caption: string;
+      // any other fields that exist in your captions
+    }
+  // Attach captions to their respective content
+contentData = contentData.map(content => {
+  // Type the captions array properly
+  const contentCaptions = (captions as Caption[]).filter(caption => caption.key === content.key);
+  
+  // Find the first matching caption
+  const firstCaption = contentCaptions[0] || null;
+  
+  return {
+    ...content,
+    caption: firstCaption?.caption || null,
+    _id: firstCaption?._id || null
+  };
+});
+    
+
+    // Extract first image and remove it from the list
+    const firstImageIndex = contentData.findIndex(item => item.type.startsWith("image/"));
+    const firstImage = firstImageIndex !== -1 ? contentData.splice(firstImageIndex, 1)[0] : null;
+
     return res.status(200).json({
       success: true,
       relative: {
-        ...relative,
-        contentData: data
+        name: relative.name,
+        email: relative.email,
+        relation: relative.relation,
+        contact: relative.contact,
+        relative_image: firstImage,  // First image set as relative_image
+        content: relative._id,
+        _id: relative._id,
+        contentData: contentData,  // Remaining content data with captions
       }
-    }) as unknown as void
+    }) as unknown as void;
 
   } catch (error) {
     return res.status(500).json({
       success: false,
       message: (error as Error).message,
-    }) as unknown as void
+    }) as unknown as void;
   }
-}
+};
+
+
+
 
 export const getAllRelatives = async (req: Request, res: Response) => {
   try {
     const user = req.user;
-    const { type } = req.query
+    const { type } = req.query;
 
     if (!user) {
-      return res.status(400).json({
+      res.status(400).json({
         success: false,
         message: "User not found",
-      }) as unknown as void
+      });
+      return 
     }
 
     if (!user.relative?.length) {
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
         relatives: [],
-      }) as unknown as void
+      });
+      return 
     }
 
+    // If the query is for settings, send the already stored data (assuming images are already present)
     if (type === "setting") {
-      return res.status(200).json({
+      const filteredRelatives = user.relative.map((relative: any) => ({
+        name: relative.name,
+        email: relative.email,
+        relation: relative.relation,
+        contact: relative.contact,
+        // Use existing relative image if available (or null)
+        relativeImage: relative.relative_image?.Location || null,
+      }));
+      res.status(200).json({
         success: true,
-        relatives: req.user?.relative,
-      }) as unknown as void
+        relatives: filteredRelatives,
+      });
+      return 
     }
-    // Map over relatives and fetch images concurrently
-    const relativePromises = await user.relative.map(async (relative: any) => {
+
+    // Otherwise, for each relative fetch the base64 image from S3 concurrently
+    const relativePromises = user.relative.map(async (relative: any) => {
       const relativeImageBase64 = await getImageFromS3(relative.relative_image?.key, "test-after-life");
       return {
-        ...relative.toObject(),
-        relativeImage: relativeImageBase64, // Add base64 image to the relative object
+        id: relative._id,
+        name: relative.name,
+        email: relative.email,
+        relation: relative.relation,
+        contact: relative.contact,
+        relativeImage: relativeImageBase64, // base64 image for the relative
       };
     });
 
-    // Wait for all promises to resolve
     const relativesWithImages = await Promise.all(relativePromises);
-    return res.status(200).json({
+    res.status(200).json({
       success: true,
       relatives: relativesWithImages,
-    }) as unknown as void
-
+    });
+    return 
   } catch (error) {
     console.error("Error fetching relatives:", error);
-
     const message = (error as Error).message;
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       message,
-    }) as unknown as void
+    });
+    return 
   }
 };
+
 
 export const getRelativeById = async (req: Request, res: Response) => {
   try {
@@ -801,3 +868,58 @@ export const getContentForRelative = async (req: Request, res: Response) => {
     return
   }
 };
+
+
+export const addVideo = async (req: Request, res: Response) => {
+  try {
+    const { caption } = req.body
+    const file = req.file;
+    if (file) {
+      const dataResponse = await s3Uploader(file as any, "test-after-life", req.user?._id as string, req.params.id as string);
+      console.log(dataResponse.succesResponse)
+      if (dataResponse.error) {
+        res.status(500).json({
+          success: false,
+          message: dataResponse.error,
+        })
+        return
+      }
+
+      const result = await UserModel.findOneAndUpdate(
+        {
+          _id: req.user?._id,
+          'relative._id': req.params.id,
+        },
+        {
+          $set: {
+            'relative.$.content': req.params.id,
+          },
+          $push: {
+            'relative.$.captions': {
+              key: dataResponse.succesResponse?.Key,
+              caption,
+            },
+          },
+        },
+        { new: true } // Return the updated document
+      ).lean()
+      console.log(result)
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+      return
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'No files uploaded.',
+      }) as unknown as void;
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: (error as Error).message,
+    });
+    return
+  }
+}

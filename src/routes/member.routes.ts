@@ -10,10 +10,11 @@ import {
       getContent,
       getContentForRelative,
       getRelativeById,
-      updateContent
-} from "../controllers/memeber.controllers";
+      updateContent,
+      addVideo
+} from "../controllers/memeber.controller";
 import { multerUpload, optimizeMedia } from "../util/multer";
-import { getStorageSize } from "../controllers/user.controllers";
+import { getStorageSize } from "../controllers/user.controller";
 import { verifyPassWord } from "../middlewares/verifyPassword";
 import { checkStorage } from "../middlewares/checkStorage";
 // import { checkFreeUserRelativeLimit } from "../middlewares/checkNumberOfRelatives";
@@ -32,5 +33,6 @@ memberRoutes.get("/delivery-response", fallBackResponded)
 memberRoutes.get("/get-relative/:id", isAuthenticatedUser, getRelativeById)
 memberRoutes.put("/update-content", isAuthenticatedUser, multerUpload.single("file"), optimizeMedia, checkStorage, updateContent)
 memberRoutes.get("/final-content", getContentForRelative)
+memberRoutes.post("/save-recorded-video/:id", isAuthenticatedUser, multerUpload.single("file"), optimizeMedia, checkStorage, addVideo)
 
 export default memberRoutes
