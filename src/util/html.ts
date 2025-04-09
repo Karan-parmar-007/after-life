@@ -72,7 +72,8 @@ export const generateMediaHtml = (media: any) => {
 };
 export const getResponseHtmlForMail = (userId: string, platform: string, text: string, notificationId?: string, relative?: string) => {
     const url = relative && notificationId ?
-        `http://ec2-13-51-70-166.eu-north-1.compute.amazonaws.com:8080/api/v1/delivery-response?userId=${userId}&relativeId=${relative}&notificationId=${notificationId}&platform=${platform}`
+        `http://ec2-13-51-70-166.eu-north-1.co
+        mpute.amazonaws.com:8080/api/v1/delivery-response?userId=${userId}&relativeId=${relative}&notificationId=${notificationId}&platform=${platform}`
         :
         `http://ec2-13-51-70-166.eu-north-1.compute.amazonaws.com:8080/api/v1/delivery-response?userId=${userId}&notificationId=${notificationId}&platform=${platform}`
     const html = `
